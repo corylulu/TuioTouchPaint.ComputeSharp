@@ -1,0 +1,96 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.22621</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <UseWPF>false</UseWPF>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Remove="Brushes\DefaultBrush\Texture01.png" />
+    <None Remove="Brushes\DefaultBrush\Texture02.png" />
+    <None Remove="Brushes\DefaultBrush\Texture03.png" />
+    <None Remove="Brushes\DefaultBrush\Texture04.png" />
+    <None Remove="Brushes\DefaultBrush\Texture05.png" />
+    <None Remove="Brushes\DefaultBrush\Texture06.png" />
+    <None Remove="Brushes\DefaultBrush\Texture07.png" />
+    <None Remove="Brushes\DefaultBrush\Texture08.png" />
+    <None Remove="Brushes\PaintBrush\Texture01.png" />
+    <None Remove="Brushes\PaintBrush\Texture02.png" />
+    <None Remove="Brushes\PaintBrush\Texture03.png" />
+    <None Remove="Brushes\PaintBrush\Texture04.png" />
+    <None Remove="Brushes\PaintBrush\Texture05.png" />
+    <None Remove="Brushes\PaintBrush\Texture06.png" />
+    <None Remove="Brushes\PaintBrush\Texture07.png" />
+    <None Remove="Brushes\PaintBrush\Texture08.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Brushes\DefaultBrush\Texture01.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Brushes\DefaultBrush\Texture02.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Brushes\DefaultBrush\Texture03.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Brushes\DefaultBrush\Texture04.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Brushes\DefaultBrush\Texture05.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Brushes\DefaultBrush\Texture06.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Brushes\DefaultBrush\Texture07.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Brushes\DefaultBrush\Texture08.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Brushes\PaintBrush\Texture01.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Brushes\PaintBrush\Texture02.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Brushes\PaintBrush\Texture03.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Brushes\PaintBrush\Texture04.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Brushes\PaintBrush\Texture05.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Brushes\PaintBrush\Texture06.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Brushes\PaintBrush\Texture07.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Brushes\PaintBrush\Texture08.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.2" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.2" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.2" />
+    <PackageReference Include="ComputeSharp" Version="3.2.0" />
+	<PackageReference Include="ComputeSharp.WinUI" Version="3.2.0" />
+    <PackageReference Include="System.Numerics.Vectors" Version="4.6.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.0" />
+    <PackageReference Include="SkiaSharp" Version="3.119.0" />
+  </ItemGroup>
+
+</Project>

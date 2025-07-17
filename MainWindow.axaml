@@ -1,0 +1,272 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:TuioTouchPaint.ComputeSharp"
+        xmlns:controls="using:TuioTouchPaint.ComputeSharp.Controls"
+        x:Class="TuioTouchPaint.ComputeSharp.MainWindow"
+        Title="TUIO Touch Paint - ComputeSharp GPU"
+        WindowState="Normal"
+        Background="White">
+
+	<!-- Main Grid Container -->
+	<Grid>
+		<!-- ComputeSharp-Native Canvas -->
+		<controls:ComputeSharpNativeCanvas Name="PaintCanvas"
+                                          HorizontalAlignment="Stretch"
+                                          VerticalAlignment="Stretch"
+                                          IsHitTestVisible="True" />
+
+		<!-- Performance Display (Top Right) -->
+		<StackPanel HorizontalAlignment="Right" VerticalAlignment="Top"
+                    Margin="20" Background="#80000000" Opacity="0.8">
+			<TextBlock Name="FpsLabel" Text="FPS: 0.0" Foreground="White" FontSize="16" FontWeight="Bold"/>
+			<TextBlock Name="TouchCountLabel" Text="Strokes: 0" Foreground="White" FontSize="14"/>
+			<TextBlock Name="GpuMemoryLabel" Text="GPU: 0.0 MB" Foreground="Lime" FontSize="12"/>
+		</StackPanel>
+
+		<!-- Settings Toggle Button (Top Left) -->
+		<Button Name="ShowSettingsButton" Content="Settings"
+                HorizontalAlignment="Left" VerticalAlignment="Top"
+                Margin="20" Padding="10,5"
+                Background="#80404040" Foreground="White"/>
+
+
+		<!-- Test Buttons for Debugging -->
+		<Border Background="#FF1E1E1E"
+                HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                Margin="10,120"
+                Padding="20" CornerRadius="5" IsVisible="True">
+			<StackPanel Spacing="15">
+				<TextBlock Text="Rendering Tests"
+                            FontSize="18" FontWeight="Bold"
+                            Foreground="White"/>
+
+				<!-- First Row of Tests -->
+				<StackPanel Orientation="Vertical" Spacing="10" HorizontalAlignment="Left">
+					<Button Name="TestRawPixelsButton" Content="Test Raw Pixels"
+                            Background="#FF4CAF50" Foreground="White"
+                            ToolTip.Tip="Draw pixels directly to canvas buffer"/>
+					<Button Name="TestParticleCreationButton" Content="Test Particle Creation"
+                            Background="#FF2196F3" Foreground="White"
+                            ToolTip.Tip="Create particles programmatically"/>
+					<Button Name="TestGpuSystemButton" Content="Test GPU System"
+                            Background="#FFFF9800" Foreground="White"
+                            ToolTip.Tip="Test GPU compute shader execution"/>
+					<Button Name="TestRenderingPipelineButton" Content="Test Rendering Pipeline"
+                            Background="#FF9C27B0" Foreground="White"
+                            ToolTip.Tip="Test full particle rendering pipeline"/>
+					<Button Name="TestCanvasUpdateButton" Content="Test Canvas Update"
+                            Background="#FF795548" Foreground="White"
+                            ToolTip.Tip="Force canvas invalidation and redraw"/>
+					<Button Name="TestStrokeSimulationButton" Content="Test Stroke Simulation"
+                            Background="#FF607D8B" Foreground="White"
+                            ToolTip.Tip="Simulate mouse stroke programmatically"/>
+					<Button Name="TestColorVisibilityButton" Content="Test Colors"
+                            Background="#FFF44336" Foreground="White"
+                            ToolTip.Tip="Test different particle colors"/>
+					<Button Name="TestSizeVisibilityButton" Content="Test Sizes"
+                            Background="#FF3F51B5" Foreground="White"
+                            ToolTip.Tip="Test different particle sizes"/>
+					<Button Name="TestBackgroundButton" Content="Test Background"
+                            Background="#FF009688" Foreground="White"
+                            ToolTip.Tip="Test canvas background colors"/>
+				</StackPanel>
+
+			</StackPanel>
+		</Border>
+
+		<!-- Settings Overlay Panel -->
+		<Grid Name="OverlayUI" Background="#E0000000" IsVisible="False">
+			<Border Background="#FF2D2D30" BorderBrush="#FF3E3E42" BorderThickness="1"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Padding="30" CornerRadius="8" MaxWidth="600">
+
+				<StackPanel Spacing="20">
+					<!-- Header -->
+					<TextBlock Text="TUIO Touch Paint - ComputeSharp GPU"
+                               FontSize="24" FontWeight="Bold"
+                               Foreground="White" HorizontalAlignment="Center"/>
+
+					<!-- GPU Status -->
+					<Border Background="#FF1E1E1E" Padding="20" CornerRadius="5">
+						<StackPanel Spacing="15">
+							<TextBlock Text="GPU Configuration"
+                                       FontSize="18" FontWeight="Bold"
+                                       Foreground="White"/>
+
+							<!-- GPU Status -->
+							<StackPanel Orientation="Horizontal" Spacing="10">
+								<Ellipse Name="GpuStatusIndicator"
+                                         Width="12" Height="12"
+                                         Fill="Lime" VerticalAlignment="Center"/>
+								<TextBlock Name="GpuStatusLabel"
+                                           Text="GPU: Ready"
+                                           Foreground="Lime" FontWeight="Bold"/>
+							</StackPanel>
+
+							<!-- GPU Details -->
+							<Border Name="GpuDetailsPanel" Background="#FF0D47A1"
+                                    Padding="15" CornerRadius="5">
+								<StackPanel Spacing="8">
+									<TextBlock Name="GpuDeviceLabel"
+                                               Text="Device: NVIDIA RTX A6000"
+                                               FontWeight="Bold" Foreground="White"/>
+									<TextBlock Name="GpuMemoryDetailsLabel"
+                                               Text="Memory: 36.2 MB allocated"
+                                               Foreground="White"/>
+									<TextBlock Name="GpuParticleCountLabel"
+                                               Text="Max Particles: 500,000"
+                                               Foreground="White"/>
+								</StackPanel>
+							</Border>
+						</StackPanel>
+					</Border>
+
+					<!-- TUIO Configuration -->
+					<Border Background="#FF1E1E1E" Padding="20" CornerRadius="5">
+						<StackPanel Spacing="15">
+							<TextBlock Text="TUIO Configuration"
+                                       FontSize="18" FontWeight="Bold"
+                                       Foreground="White"/>
+
+							<!-- TUIO Status -->
+							<StackPanel Orientation="Horizontal" Spacing="10">
+								<Ellipse Name="TuioStatusIndicator"
+                                         Width="12" Height="12"
+                                         Fill="Red" VerticalAlignment="Center"/>
+								<TextBlock Name="TuioStatusLabel"
+                                           Text="TUIO: Disconnected"
+                                           Foreground="Red" FontWeight="Bold"/>
+							</StackPanel>
+
+							<!-- Connection Controls -->
+							<StackPanel Orientation="Horizontal" Spacing="10">
+								<TextBlock Text="Port:" Foreground="White" VerticalAlignment="Center"/>
+								<TextBox Name="TuioPortTextBox" Text="3333" Width="80"/>
+								<Button Name="ConnectTuioButton" Content="Connect"
+                                        Background="#FF4CAF50" Foreground="White"/>
+							</StackPanel>
+
+							<!-- Connection Details Panel -->
+							<Border Name="TuioStatusPanel" Background="#FF0D47A1"
+                                    Padding="15" CornerRadius="5" IsVisible="False">
+								<StackPanel Spacing="8">
+									<TextBlock Name="TuioConnectionDetails"
+                                               Text="Connection Details"
+                                               FontWeight="Bold" Foreground="White"/>
+									<TextBlock Name="TuioConnectionHelp"
+                                               Text="Connection help text"
+                                               Foreground="White" TextWrapping="Wrap"/>
+								</StackPanel>
+							</Border>
+
+							<!-- TUIO Coordinate Configuration -->
+							<Expander Header="Advanced TUIO Settings" Foreground="White">
+								<Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="Auto,*,Auto,*" Margin="10">
+									<TextBlock Grid.Row="0" Grid.Column="0" Text="X Min:" Foreground="White" VerticalAlignment="Center"/>
+									<TextBox Grid.Row="0" Grid.Column="1" Name="TuioXMinTextBox" Text="0.0" Margin="5,0"/>
+									<TextBlock Grid.Row="0" Grid.Column="2" Text="X Max:" Foreground="White" VerticalAlignment="Center"/>
+									<TextBox Grid.Row="0" Grid.Column="3" Name="TuioXMaxTextBox" Text="1.0" Margin="5,0"/>
+
+									<TextBlock Grid.Row="1" Grid.Column="0" Text="Y Min:" Foreground="White" VerticalAlignment="Center"/>
+									<TextBox Grid.Row="1" Grid.Column="1" Name="TuioYMinTextBox" Text="0.0" Margin="5,0"/>
+									<TextBlock Grid.Row="1" Grid.Column="2" Text="Y Max:" Foreground="White" VerticalAlignment="Center"/>
+									<TextBox Grid.Row="1" Grid.Column="3" Name="TuioYMaxTextBox" Text="1.0" Margin="5,0"/>
+								</Grid>
+							</Expander>
+						</StackPanel>
+					</Border>
+
+
+					<!-- Control Buttons -->
+					<StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Center">
+						<Button Name="ClearCanvasButton" Content="Clear Canvas"
+                                Background="#FFFF5722" Foreground="White"/>
+						<Button Name="DebugToggleButton" Content="Debug"
+                                Background="#FF9C27B0" Foreground="White"/>
+						<Button Name="CloseSettingsButton" Content="Close"
+                                Background="#FF607D8B" Foreground="White"/>
+					</StackPanel>
+				</StackPanel>
+			</Border>
+		</Grid>
+
+		<!-- Debug Panel -->
+		<Border Name="DebugPanel"
+                Background="#E0000000"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Bottom"
+                Margin="20"
+                Padding="20"
+                CornerRadius="8"
+                MaxWidth="400"
+                MaxHeight="500"
+                IsVisible="False">
+
+			<StackPanel Spacing="15">
+				<TextBlock Text="Debug Information"
+                           FontSize="18" FontWeight="Bold"
+                           Foreground="White"/>
+
+				<!-- GPU Performance -->
+				<Border Background="#FF1E1E1E" Padding="10" CornerRadius="5">
+					<StackPanel Spacing="10">
+						<TextBlock Text="GPU Performance"
+                                   Foreground="White" FontWeight="Bold"/>
+						<TextBlock Name="GpuUpdateTimeLabel"
+                                   Text="Update Time: 0.00ms"
+                                   Foreground="Lime" FontSize="12"/>
+						<TextBlock Name="GpuParticleStatsLabel"
+                                   Text="Particles: 0 / 500,000"
+                                   Foreground="White" FontSize="12"/>
+					</StackPanel>
+				</Border>
+
+				<!-- Cursor List -->
+				<Border Background="#FF1E1E1E" Padding="10" CornerRadius="5">
+					<StackPanel Spacing="10">
+						<StackPanel Orientation="Horizontal" Spacing="10">
+							<TextBlock Name="CursorCountLabel"
+                                       Text="Active Cursors: 0"
+                                       Foreground="White" FontWeight="Bold"/>
+							<Button Name="RefreshCursorsButton" Content="Refresh"
+                                    Background="#FF2196F3" Foreground="White"/>
+						</StackPanel>
+
+						<ScrollViewer MaxHeight="300">
+							<ItemsControl Name="CursorList">
+								<ItemsControl.ItemTemplate>
+									<DataTemplate>
+										<Border Background="#FF2D2D30"
+                                                Padding="8" Margin="2"
+                                                CornerRadius="3">
+											<Grid ColumnDefinitions="Auto,*">
+												<TextBlock Grid.Column="0"
+                                                           Text="{Binding SessionIdDisplay}"
+                                                           Foreground="Cyan" FontWeight="Bold"
+                                                           VerticalAlignment="Center"/>
+												<StackPanel Grid.Column="1" Margin="10,0,0,0">
+													<TextBlock Text="{Binding CoordinatesDisplay}"
+                                                               Foreground="White" FontSize="12"/>
+													<TextBlock Text="{Binding VelocityDisplay}"
+                                                               Foreground="LightGray" FontSize="11"/>
+													<TextBlock Text="{Binding TimestampDisplay}"
+                                                               Foreground="Gray" FontSize="10"/>
+												</StackPanel>
+											</Grid>
+										</Border>
+									</DataTemplate>
+								</ItemsControl.ItemTemplate>
+							</ItemsControl>
+						</ScrollViewer>
+					</StackPanel>
+				</Border>
+
+				<!-- Debug Controls -->
+				<StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Center">
+					<Button Name="ClearDebugButton" Content="Clear Debug"
+                            Background="#FFFF5722" Foreground="White"/>
+				</StackPanel>
+			</StackPanel>
+		</Border>
+	</Grid>
+</Window>

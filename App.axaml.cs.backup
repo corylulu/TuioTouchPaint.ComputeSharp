@@ -1,0 +1,66 @@
+using Avalonia;
+using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Markup.Xaml;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using TuioTouchPaint.ComputeSharp.Services;
+using TuioTouchPaint.ComputeSharp.Models;
+using System.Runtime.InteropServices;
+
+namespace TuioTouchPaint.ComputeSharp;
+
+public partial class App : Application
+{
+    private IServiceProvider? _serviceProvider;
+    
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AllocConsole();
+    
+    public override void Initialize()
+    {
+        AvaloniaXamlLoader.Load(this);
+    }
+
+    public override void OnFrameworkInitializationCompleted()
+    {
+        // Configure dependency injection
+        var services = new ServiceCollection();
+        ConfigureServices(services);
+        _serviceProvider = services.BuildServiceProvider();
+        
+        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+        {
+            desktop.MainWindow = _serviceProvider.GetRequiredService<MainWindow>();
+        }
+
+        base.OnFrameworkInitializationCompleted();
+    }
+    
+    private void ConfigureServices(IServiceCollection services)
+    {
+        // Allocate console for Windows application
+        AllocConsole();
+        
+        // Logging
+        services.AddLogging(builder =>
+        {
+            builder.AddConsole(options =>
+            {
+                options.IncludeScopes = true;
+                options.TimestampFormat = "[HH:mm:ss.fff] ";
+            });
+            builder.SetMinimumLevel(LogLevel.Debug);
+        });
+        
+        // Services
+        services.AddSingleton<ICoordinateConverter, CoordinateConverter>();
+        services.AddSingleton<IInputManager, InputManager>();
+        services.AddSingleton<GpuTextureAtlas>();
+        services.AddSingleton<ParticleSpawner>();
+        services.AddSingleton<ComputeSharpParticleSystem>();
+        services.AddSingleton<ComputeSharpDrawingController>();
+        
+        // Main window
+        services.AddSingleton<MainWindow>();
+    }
+} 

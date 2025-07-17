@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "TuioTouchPaint.ComputeSharp (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "TuioTouchPaint.ComputeSharp (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

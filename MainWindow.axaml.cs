@@ -1,0 +1,1507 @@
+#define RAW_MOUSE_POINTER
+using System.Runtime.InteropServices;
+using System.Diagnostics;
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Controls.Shapes;
+using Avalonia.Markup.Xaml;
+using Avalonia.Media;
+using Avalonia.Interactivity;
+using Avalonia.Threading;
+using Microsoft.Extensions.Logging;
+using ComputeSharp;
+using TuioTouchPaint.ComputeSharp.Services;
+using TuioTouchPaint.ComputeSharp.Controls;
+using TuioTouchPaint.ComputeSharp.Models;
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using System.Timers;
+using System.Numerics;
+using System.Threading;
+
+namespace TuioTouchPaint.ComputeSharp;
+
+public partial class MainWindow : Window
+{
+    private readonly ILogger<MainWindow> _logger;
+    
+    // ComputeSharp GPU services
+    private readonly ComputeSharpParticleSystem _particleSystem;
+    private readonly ICoordinateConverter _coordinateConverter;
+    private readonly IInputManager _inputManager;
+    
+    // TUIO client for receiving touch input
+    private TuioClient? _tuioClient;
+    
+    // ComputeSharp-native canvas for optimized rendering
+    private ComputeSharpNativeCanvas? _paintCanvas;
+    
+    // UI update timer
+    private System.Timers.Timer? _uiUpdateTimer;
+    
+    // Input batching for efficient GPU particle spawning
+    private readonly InputBatch _inputBatch = new InputBatch(1024);
+    private readonly Dictionary<int, Vector2> _lastPositions = new();
+    private readonly Dictionary<int, float> _lastTimestamps = new();
+    private readonly object _inputLock = new();
+    
+    // UI State
+    private bool _isFullscreen = false;
+    private WindowState _previousWindowState;
+    
+    // TUIO configuration
+    private bool _isConnected = false;
+    private float _tuioXMin = 0.0f;
+    private float _tuioXMax = 1.0f;
+    private float _tuioYMin = 0.0f;
+    private float _tuioYMax = 1.0f;
+    
+    private readonly Random _rng = new();
+    private int _textureCounter = 0;
+    
+    public MainWindow()
+    {
+        // Default constructor for XAML
+        var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        _logger = loggerFactory.CreateLogger<MainWindow>();
+        
+        // Initialize services with defaults
+        _coordinateConverter = new CoordinateConverter(loggerFactory.CreateLogger<CoordinateConverter>());
+        _inputManager = new InputManager(loggerFactory.CreateLogger<InputManager>(), _coordinateConverter);
+                    _particleSystem = new ComputeSharpParticleSystem(
+                loggerFactory.CreateLogger<ComputeSharpParticleSystem>());
+        
+        InitializeComponent();
+        
+        // Initialize after component loading
+        this.Loaded += MainWindow_Loaded;
+        
+        _logger.LogInformation("ComputeSharp MainWindow initialized successfully");
+    }
+    
+    public MainWindow(
+        ComputeSharpParticleSystem particleSystem,
+        ICoordinateConverter coordinateConverter,
+        IInputManager inputManager,
+        ILogger<MainWindow> logger)
+    {
+        _particleSystem = particleSystem;
+        _coordinateConverter = coordinateConverter;
+        _inputManager = inputManager;
+        _logger = logger;
+        
+        InitializeComponent();
+        
+        // Initialize after component loading
+        this.Loaded += MainWindow_Loaded;
+        
+        _logger.LogInformation("ComputeSharp MainWindow with DI initialized successfully");
+    }
+    
+    private void InitializeComponent()
+    {
+        AvaloniaXamlLoader.Load(this);
+        
+        // Get the ComputeSharpNativeCanvas for optimized GPU rendering
+        _paintCanvas = this.FindControl<ComputeSharpNativeCanvas>("PaintCanvas");
+        if (_paintCanvas != null)
+        {
+            // Inject the particle system to prevent duplicate instances
+            _paintCanvas.SetParticleSystem(_particleSystem);
+            _logger.LogInformation("ComputeSharpNativeCanvas found and configured for optimized GPU rendering");
+        }
+        else
+        {
+            _logger.LogError("ComputeSharpNativeCanvas not found in XAML");
+        }
+        
+        // Wire up event handlers
+        SetupEventHandlers();
+#if RAW_MOUSE_POINTER
+
+        // Wait until the window is actually on screen
+        Opened += (_, _) =>
+        {
+            if (TryGetPlatformHandle()?.Handle is { } hwnd && hwnd != IntPtr.Zero)
+            {
+                // hwnd is the real Win32 HWND (on Windows)
+                Debug.WriteLine($"Window handle = 0x{hwnd.ToInt64():X}");
+                InitializeRawMouseInput();
+            }
+        };
+        // Initialize raw mouse input
+#endif
+        // Set up mouse input for testing
+        SetupMouseInput();
+    }
+    
+    private void SetupEventHandlers()
+    {
+        // Settings button
+        var showSettingsButton = this.FindControl<Button>("ShowSettingsButton");
+        if (showSettingsButton != null)
+        {
+            showSettingsButton.Click += ShowSettingsButton_Click;
+        }
+        
+        // Close settings button
+        var closeSettingsButton = this.FindControl<Button>("CloseSettingsButton");
+        if (closeSettingsButton != null)
+        {
+            closeSettingsButton.Click += CloseSettingsButton_Click;
+        }
+        
+        // TUIO connect button
+        var connectTuioButton = this.FindControl<Button>("ConnectTuioButton");
+        if (connectTuioButton != null)
+        {
+            connectTuioButton.Click += ConnectTuioButton_Click;
+        }
+        
+        // Clear canvas button
+        var clearCanvasButton = this.FindControl<Button>("ClearCanvasButton");
+        if (clearCanvasButton != null)
+        {
+            clearCanvasButton.Click += ClearCanvasButton_Click;
+        }
+        
+        // Debug toggle button
+        var debugToggleButton = this.FindControl<Button>("DebugToggleButton");
+        if (debugToggleButton != null)
+        {
+            debugToggleButton.Click += DebugToggleButton_Click;
+        }
+        
+        // Refresh cursors button
+        var refreshCursorsButton = this.FindControl<Button>("RefreshCursorsButton");
+        if (refreshCursorsButton != null)
+        {
+            refreshCursorsButton.Click += RefreshCursorsButton_Click;
+        }
+        
+        // Clear debug button
+        var clearDebugButton = this.FindControl<Button>("ClearDebugButton");
+        if (clearDebugButton != null)
+        {
+            clearDebugButton.Click += ClearDebugButton_Click;
+        }
+        
+        // Test buttons
+        SetupTestButtonHandlers();
+        
+        // Keyboard shortcuts
+        this.KeyDown += MainWindow_KeyDown;
+    }
+    
+    private void SetupMouseInput()
+    {
+        // Set up mouse input handlers on the canvas for testing
+        if (_paintCanvas != null)
+        {
+            _paintCanvas.PointerPressed += OnPointerPressed;
+            _paintCanvas.PointerMoved += OnPointerMoved;
+            _paintCanvas.PointerReleased += OnPointerReleased;
+            _logger.LogInformation("Mouse input handlers attached to DirectX12Canvas");
+        }
+    }
+    
+    private void InitializeTuioClient()
+    {
+        try
+        {
+            // Create a logger specifically for TuioClient
+            var loggerFactory = LoggerFactory.Create(builder =>
+            {
+                builder.AddConsole().SetMinimumLevel(LogLevel.Debug);
+            });
+            var tuioLogger = loggerFactory.CreateLogger<TuioClient>();
+            
+            _tuioClient = new TuioClient(tuioLogger);
+            
+            // Subscribe to TUIO events and convert to particle system input
+            _tuioClient.CursorAdded += OnTuioCursorAdded;
+            _tuioClient.CursorUpdated += OnTuioCursorUpdated;
+            _tuioClient.CursorRemoved += OnTuioCursorRemoved;
+            _tuioClient.FrameFinished += OnTuioFrameFinished;
+            
+            // Start listening on default TUIO port (3333)
+            _tuioClient.Start(3333);
+            
+            _logger.LogInformation("TUIO client initialized and listening on port 3333");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to initialize TUIO client");
+        }
+    }
+    
+    // TUIO event handlers
+    private void OnTuioCursorAdded(object? sender, TuioCursor cursor)
+    {
+        lock (_inputLock)
+        {
+            // Convert TUIO coordinates to canvas coordinates
+            var canvasPos = cursor.ToScreenCoordinates((float)(_paintCanvas?.Bounds.Width ?? 1920), (float)(_paintCanvas?.Bounds.Height ?? 1080));
+            var currentTime = (float)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0f;
+            
+            // Store position and timestamp for interpolation
+            _lastPositions[cursor.SessionId] = new Vector2(canvasPos.ScreenX, canvasPos.ScreenY);
+            _lastTimestamps[cursor.SessionId] = currentTime;
+            
+            // Create input event
+                            var inputEvent = new InputEvent
+                {
+                    Position = new Float2(canvasPos.ScreenX, canvasPos.ScreenY),
+                    Velocity = new Float2(cursor.VelocityX * 100, cursor.VelocityY * 100), // Scale velocity
+                    Color = new Float4(GetColorForSession(cursor.SessionId).X, GetColorForSession(cursor.SessionId).Y, 
+                                      GetColorForSession(cursor.SessionId).Z, GetColorForSession(cursor.SessionId).W),
+                    Size = GetSizeForSession(cursor.SessionId),
+                    Timestamp = currentTime,
+                    SessionId = cursor.SessionId,
+                    TextureIndex = (_textureCounter++) & 7,
+                    Rotation = (float)(_rng.NextDouble() * MathF.Tau)
+                };
+            
+            // Process immediately
+            _particleSystem.ProcessInputEvents(new[] { inputEvent });
+            
+            _logger.LogDebug($"🖐️ TUIO cursor added - Session {cursor.SessionId} at ({canvasPos.ScreenX:F1}, {canvasPos.ScreenY:F1})");
+        }
+    }
+    
+    private void OnTuioCursorUpdated(object? sender, TuioCursor cursor)
+    {
+        lock (_inputLock)
+        {
+            if (_lastPositions.TryGetValue(cursor.SessionId, out var lastPos) && 
+                _lastTimestamps.TryGetValue(cursor.SessionId, out var lastTime))
+            {
+                // Convert TUIO coordinates to canvas coordinates
+                var canvasPos = cursor.ToScreenCoordinates((float)(_paintCanvas?.Bounds.Width ?? 1920), (float)(_paintCanvas?.Bounds.Height ?? 1080));
+                var currentPos = new Vector2(canvasPos.ScreenX, canvasPos.ScreenY);
+                var currentTime = (float)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0f;
+                var velocity = (currentPos - lastPos) * 60.0f; // Convert to velocity
+                
+                // Create continuous trail by interpolating between positions
+                var distance = Vector2.Distance(lastPos, currentPos);
+                var events = new List<InputEvent>();
+                
+                // Create more events for longer distances to ensure continuous trail
+                var numEvents = Math.Max(1, (int)(distance / 2.0f)); // One event every 2 pixels for denser trail
+                
+                for (int i = 0; i < numEvents; i++)
+                {
+                    var t = numEvents == 1 ? 1.0f : (float)i / (numEvents - 1);
+                    var interpPos = Vector2.Lerp(lastPos, currentPos, t);
+                    
+                    // Blend timestamps for gradual fade: earlier interpolated points get earlier timestamps
+                    var blendedTime = lastTime + (currentTime - lastTime) * t;
+                    
+                    var inputEvent = new InputEvent
+                    {
+                        Position = new Float2(interpPos.X, interpPos.Y),
+                        Velocity = new Float2(velocity.X, velocity.Y),
+                        Color = new Float4(GetColorForSession(cursor.SessionId).X, GetColorForSession(cursor.SessionId).Y, 
+                                          GetColorForSession(cursor.SessionId).Z, GetColorForSession(cursor.SessionId).W),
+                        Size = GetSizeForSession(cursor.SessionId),
+                        Timestamp = blendedTime,
+                        SessionId = cursor.SessionId,
+                        TextureIndex = (_textureCounter++) & 7,
+                        Rotation = (float)(_rng.NextDouble() * MathF.Tau)
+                    };
+                    
+                    events.Add(inputEvent);
+                }
+                
+                _lastPositions[cursor.SessionId] = currentPos;
+                _lastTimestamps[cursor.SessionId] = currentTime;
+                
+                // Process all interpolated events
+                _particleSystem.ProcessInputEvents(events.ToArray());
+                
+                if (events.Count > 1)
+                {
+                    var timeDiff = currentTime - lastTime;
+                    _logger.LogDebug($"🔄 TUIO interpolated {events.Count} events for session {cursor.SessionId}, distance {distance:F1}px, time span {timeDiff:F3}s");
+                }
+            }
+        }
+    }
+    
+    private void OnTuioCursorRemoved(object? sender, TuioCursor cursor)
+    {
+        lock (_inputLock)
+        {
+            _lastPositions.Remove(cursor.SessionId);
+            _lastTimestamps.Remove(cursor.SessionId);
+        }
+        
+        _logger.LogDebug($"🖐️ TUIO cursor removed - Session {cursor.SessionId}");
+    }
+    
+    private void OnTuioFrameFinished(object? sender, EventArgs e)
+    {
+        // Frame finished - can be used for batching or synchronization if needed
+        // For now, we process events immediately so no action needed
+    }
+    
+    private void SetupTestButtonHandlers()
+    {
+        // Test Raw Pixels Button
+        var testRawPixelsButton = this.FindControl<Button>("TestRawPixelsButton");
+        if (testRawPixelsButton != null)
+        {
+            testRawPixelsButton.Click += TestRawPixelsButton_Click;
+        }
+        
+        // Test Particle Creation Button
+        var testParticleCreationButton = this.FindControl<Button>("TestParticleCreationButton");
+        if (testParticleCreationButton != null)
+        {
+            testParticleCreationButton.Click += TestParticleCreationButton_Click;
+        }
+        
+        // Test GPU System Button
+        var testGpuSystemButton = this.FindControl<Button>("TestGpuSystemButton");
+        if (testGpuSystemButton != null)
+        {
+            testGpuSystemButton.Click += TestGpuSystemButton_Click;
+        }
+        
+        // Test Rendering Pipeline Button
+        var testRenderingPipelineButton = this.FindControl<Button>("TestRenderingPipelineButton");
+        if (testRenderingPipelineButton != null)
+        {
+            testRenderingPipelineButton.Click += TestRenderingPipelineButton_Click;
+        }
+        
+        // Test Canvas Update Button
+        var testCanvasUpdateButton = this.FindControl<Button>("TestCanvasUpdateButton");
+        if (testCanvasUpdateButton != null)
+        {
+            testCanvasUpdateButton.Click += TestCanvasUpdateButton_Click;
+        }
+        
+        // Test Stroke Simulation Button
+        var testStrokeSimulationButton = this.FindControl<Button>("TestStrokeSimulationButton");
+        if (testStrokeSimulationButton != null)
+        {
+            testStrokeSimulationButton.Click += TestStrokeSimulationButton_Click;
+        }
+        
+        // Test Color Visibility Button
+        var testColorVisibilityButton = this.FindControl<Button>("TestColorVisibilityButton");
+        if (testColorVisibilityButton != null)
+        {
+            testColorVisibilityButton.Click += TestColorVisibilityButton_Click;
+        }
+        
+        // Test Size Visibility Button
+        var testSizeVisibilityButton = this.FindControl<Button>("TestSizeVisibilityButton");
+        if (testSizeVisibilityButton != null)
+        {
+            testSizeVisibilityButton.Click += TestSizeVisibilityButton_Click;
+        }
+        
+        // Test Background Button
+        var testBackgroundButton = this.FindControl<Button>("TestBackgroundButton");
+        if (testBackgroundButton != null)
+        {
+            testBackgroundButton.Click += TestBackgroundButton_Click;
+        }
+    }
+    
+    private async void MainWindow_Loaded(object? sender, RoutedEventArgs e)
+    {
+        try
+        {
+            _logger.LogInformation("MainWindow loading - initializing GPU systems...");
+            
+            // Initialize particle system
+            await _particleSystem.InitializeAsync();
+            
+            // Set coordinate converter canvas size
+            _coordinateConverter.CanvasSize = ((int)Width, (int)Height);
+            
+            // Connect the canvas to our particle system
+            if (_paintCanvas != null)
+            {
+                // ComputeSharpNativeCanvas already has particle system injected in InitializeComponent
+                _logger.LogInformation("ComputeSharpNativeCanvas connected to main particle system");
+            }
+            else
+            {
+                _logger.LogError("PaintCanvas not found - cannot connect to particle system");
+            }
+            
+            // Update GPU status in UI
+            UpdateGpuStatus();
+            
+            // Initialize TUIO client
+            InitializeTuioClient();
+                        
+            // Start UI update timer
+            _uiUpdateTimer = new System.Timers.Timer(100); // 10 FPS for UI updates
+            _uiUpdateTimer.Elapsed += UiUpdateTimer_Elapsed;
+            _uiUpdateTimer.Start();
+            
+            _logger.LogInformation("MainWindow loaded successfully with GPU acceleration");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to initialize MainWindow");
+            
+            // Show error in UI
+            var errorDialog = new Window
+            {
+                Title = "Initialization Error",
+                Content = new TextBlock
+                {
+                    Text = $"Failed to initialize GPU systems:\n{ex.Message}",
+                    Margin = new Thickness(20),
+                    Foreground = Brushes.Red
+                }
+            };
+            
+            await errorDialog.ShowDialog(this);
+        }
+    }
+    
+    private void UpdateGpuStatus()
+    {
+        try
+        {
+            var device = GraphicsDevice.GetDefault();
+            var stats = _particleSystem.GetStatistics();
+            
+            // Update GPU status labels
+            var gpuStatusLabel = this.FindControl<TextBlock>("GpuStatusLabel");
+            if (gpuStatusLabel != null)
+            {
+                gpuStatusLabel.Text = "GPU: Ready";
+                gpuStatusLabel.Foreground = Brushes.Lime;
+            }
+            
+            var gpuDeviceLabel = this.FindControl<TextBlock>("GpuDeviceLabel");
+            if (gpuDeviceLabel != null)
+            {
+                gpuDeviceLabel.Text = $"Device: {device.Name}";
+            }
+            
+            var gpuMemoryDetailsLabel = this.FindControl<TextBlock>("GpuMemoryDetailsLabel");
+            if (gpuMemoryDetailsLabel != null)
+            {
+                gpuMemoryDetailsLabel.Text = $"Memory: {_particleSystem.GetGpuMemoryUsageMB():F1} MB allocated";
+            }
+            
+            var gpuParticleCountLabel = this.FindControl<TextBlock>("GpuParticleCountLabel");
+            if (gpuParticleCountLabel != null)
+            {
+                gpuParticleCountLabel.Text = $"Max Particles: {stats.TotalParticles:N0}";
+            }
+            
+            // Update status indicator
+            var gpuStatusIndicator = this.FindControl<Ellipse>("GpuStatusIndicator");
+            if (gpuStatusIndicator != null)
+            {
+                gpuStatusIndicator.Fill = Brushes.Lime;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to update GPU status");
+        }
+    }
+    
+    private void UiUpdateTimer_Elapsed(object? sender, ElapsedEventArgs e)
+    {
+        // No need to process input events here - they're processed immediately
+        // ProcessInputEvents();
+        
+        Dispatcher.UIThread.Post(() =>
+        {
+            try
+            {
+                UpdatePerformanceDisplay();
+                UpdateDebugDisplay();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error updating UI");
+            }
+        });
+    }
+    
+    private void ProcessInputEvents()
+    {
+        try
+        {
+            // Get current batched input events
+            InputEvent[] currentEvents;
+            lock (_inputLock)
+            {
+                var events = _inputBatch.GetEvents();
+                currentEvents = events.ToArray();
+                _inputBatch.Clear();
+            }
+
+            // Process batched inputs on GPU
+            if (currentEvents.Length > 0)
+            {
+                _logger.LogDebug($"📥 Processing {currentEvents.Length} batched input events");
+                _particleSystem.ProcessInputEvents(currentEvents);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing input events");
+        }
+    }
+    
+    private void UpdatePerformanceDisplay()
+    {
+        var stats = _particleSystem.GetStatistics();
+        var freelistCount = _particleSystem.GetFreelistCount();
+        
+        // Get performance stats from the canvas
+        var canvasStats = _paintCanvas?.GetPerformanceStats() ?? (0, 0, 0, 0);
+        var resolution = _paintCanvas?.GetResolution() ?? (0, 0);
+        
+        // Update FPS label - show both render and update FPS
+        var fpsLabel = this.FindControl<TextBlock>("FpsLabel");
+        if (fpsLabel != null)
+        {
+            fpsLabel.Text = $"🚀 Render: {canvasStats.RenderFPS:F1} FPS | Update: {canvasStats.UpdateFPS:F1} FPS";
+        }
+        
+        // Update particle count with resolution info
+        var touchCountLabel = this.FindControl<TextBlock>("TouchCountLabel");
+        if (touchCountLabel != null)
+        {
+            touchCountLabel.Text = $"Particles: {stats.AliveParticles:N0} | Resolution: {resolution.Width}x{resolution.Height}";
+        }
+        
+        // Update GPU memory
+        var gpuMemoryLabel = this.FindControl<TextBlock>("GpuMemoryLabel");
+        if (gpuMemoryLabel != null)
+        {
+            gpuMemoryLabel.Text = $"GPU: {_particleSystem.GetGpuMemoryUsageMB():F1} MB | ComputeSharp Native";
+        }
+    }
+    
+    private void UpdateDebugDisplay()
+    {
+        var stats = _particleSystem.GetStatistics();
+        var freelistCount = _particleSystem.GetFreelistCount();
+        
+        // Get canvas performance stats
+        var canvasStats = _paintCanvas?.GetPerformanceStats() ?? (0, 0, 0, 0);
+        
+        // Update GPU performance labels with canvas render performance
+        var gpuUpdateTimeLabel = this.FindControl<TextBlock>("GpuUpdateTimeLabel");
+        if (gpuUpdateTimeLabel != null)
+        {
+            gpuUpdateTimeLabel.Text = $"Update: {stats.AvgUpdateTimeMs:F2}ms | Render: {(canvasStats.RenderFPS > 0 ? 1000.0 / canvasStats.RenderFPS : 0):F2}ms";
+        }
+        
+        var gpuParticleStatsLabel = this.FindControl<TextBlock>("GpuParticleStatsLabel");
+        if (gpuParticleStatsLabel != null)
+        {
+            gpuParticleStatsLabel.Text = $"Particles: {stats.AliveParticles:N0} / {stats.TotalParticles:N0} (Free: {freelistCount:N0})";
+        }
+        
+        // Update cursor count
+        var cursorCountLabel = this.FindControl<TextBlock>("CursorCountLabel");
+        if (cursorCountLabel != null)
+        {
+            cursorCountLabel.Text = "Active Cursors: 0"; // TODO: Implement cursor tracking
+        }
+    }
+    
+    private void ShowSettingsButton_Click(object? sender, RoutedEventArgs e)
+    {
+        var overlayUI = this.FindControl<Grid>("OverlayUI");
+        if (overlayUI != null)
+        {
+            overlayUI.IsVisible = true;
+        }
+    }
+    
+    private void CloseSettingsButton_Click(object? sender, RoutedEventArgs e)
+    {
+        var overlayUI = this.FindControl<Grid>("OverlayUI");
+        if (overlayUI != null)
+        {
+            overlayUI.IsVisible = false;
+        }
+    }
+    
+    private void ConnectTuioButton_Click(object? sender, RoutedEventArgs e)
+    {
+        // TODO: Implement TUIO connection
+        _logger.LogInformation("TUIO connection requested");
+    }
+    
+    private void ClearCanvasButton_Click(object? sender, RoutedEventArgs e)
+    {
+        _particleSystem.ClearAllParticles();
+        _logger.LogInformation("Canvas cleared");
+    }
+    
+    private void DebugToggleButton_Click(object? sender, RoutedEventArgs e)
+    {
+        var debugPanel = this.FindControl<Border>("DebugPanel");
+        if (debugPanel != null)
+        {
+            debugPanel.IsVisible = !debugPanel.IsVisible;
+        }
+    }
+    
+    private void RefreshCursorsButton_Click(object? sender, RoutedEventArgs e)
+    {
+        // TODO: Implement cursor refresh
+        _logger.LogInformation("Cursor refresh requested");
+    }
+    
+    private void ClearDebugButton_Click(object? sender, RoutedEventArgs e)
+    {
+        // TODO: Implement debug clear
+        _logger.LogInformation("Debug clear requested");
+    }
+    
+    #region Test Button Event Handlers
+    
+    private void TestRawPixelsButton_Click(object? sender, RoutedEventArgs e)
+    {
+        _logger.LogInformation("🔴 TEST: Raw Pixels - Drawing directly to canvas buffer");
+        
+        if (_paintCanvas != null)
+        {
+            // DirectX12Canvas handles raw pixel drawing internally
+            _logger.LogInformation("DirectX 12 canvas is active for raw pixel drawing");
+        }
+        else
+        {
+            _logger.LogError("PaintCanvas is null - cannot test raw pixels");
+        }
+    }
+    
+    private void TestParticleCreationButton_Click(object? sender, RoutedEventArgs e)
+    {
+        _logger.LogInformation("🔵 TEST: Particle Creation - Creating particles programmatically");
+        
+        try
+        {
+            // Create particles at known positions
+            for (int i = 0; i < 10; i++)
+            {
+                var x = 200 + (i * 50);
+                var y = 200 + (i * 10);
+                
+                _particleSystem.StartStroke(
+                    sessionId: 1000 + i,
+                    x: x,
+                    y: y,
+                    brushId: "default",
+                    size: 100.0f,
+                    color: new Float4(1.0f, 0.0f, 0.0f, 1.0f) // Red
+                );
+                
+                // Add some particles to the stroke
+                for (int j = 0; j < 5; j++)
+                {
+                    _particleSystem.Update(0.016f); // Force particle creation
+                }
+                
+                _particleSystem.EndStroke(1000 + i);
+            }
+            
+            _logger.LogInformation($"✅ Created test particles at positions 200-650");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ Failed to create test particles");
+        }
+    }
+    
+    private void TestGpuSystemButton_Click(object? sender, RoutedEventArgs e)
+    {
+        _logger.LogInformation("🟠 TEST: GPU System - Testing compute shader execution");
+        
+        try
+        {
+            // Test GPU device
+            var device = GraphicsDevice.GetDefault();
+            _logger.LogInformation($"GPU Device: {device.Name}");
+            
+            // Test particle system statistics
+            var stats = _particleSystem.GetStatistics();
+            _logger.LogInformation($"Particle Stats: {stats.AliveParticles} alive, {stats.TotalParticles} total");
+            
+            // Test particle creation and GPU upload
+            _particleSystem.StartStroke(2000, 400, 300, "default", 150.0f, new Float4(0.0f, 1.0f, 0.0f, 1.0f));
+            _particleSystem.Update(0.016f);
+            
+            var newStats = _particleSystem.GetStatistics();
+            _logger.LogInformation($"After test: {newStats.AliveParticles} alive, {newStats.TotalParticles} total");
+            
+            _logger.LogInformation("✅ GPU system test completed");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ GPU system test failed");
+        }
+    }
+    
+    private void TestRenderingPipelineButton_Click(object? sender, RoutedEventArgs e)
+    {
+        _logger.LogInformation("🟣 TEST: CPU Readback - Verifying GPU particle rendering");
+        
+        try
+        {
+            if (_paintCanvas == null)
+            {
+                _logger.LogError("❌ Paint canvas is null");
+                return;
+            }
+            
+            // Clear existing particles and create test particles
+            //_particleSystem.ClearAllParticles();
+            
+            // Create visible test particles
+            var colors = new Float4[]
+            {
+                new Float4(1.0f, 0.0f, 0.0f, 1.0f), // Red
+                new Float4(0.0f, 1.0f, 0.0f, 1.0f), // Green
+                new Float4(0.0f, 0.0f, 1.0f, 1.0f), // Blue
+                new Float4(1.0f, 1.0f, 0.0f, 1.0f), // Yellow
+                new Float4(1.0f, 0.0f, 1.0f, 1.0f), // Magenta
+            };
+            
+            _logger.LogInformation("Creating test particles for GPU verification...");
+            
+            for (int i = 0; i < colors.Length; i++)
+            {
+                var sessionId = 8000 + i;
+                var x = 200 + (i * 150);
+                var y = 200 + (i * 50);
+                
+                // Create multiple input events for each color to make particles more visible
+                for (int j = 0; j < 10; j++)
+                {
+                    var inputEvent = new InputEvent
+                    {
+                        Position = new Float2(x + (j * 5), y + (j * 2)), // Spread particles slightly
+                        Velocity = new Float2(0, 0),
+                        Color = colors[i],
+                        Size = 80.0f, // Large particles for visibility
+                        Timestamp = (float)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0f,
+                        SessionId = sessionId,
+                        TextureIndex = i % 8,
+                        Rotation = 0.0f
+                    };
+                    
+                    _particleSystem.ProcessInputEvents(new[] { inputEvent });
+                }
+                
+                _logger.LogInformation($"Created {colors[i]} particles at ({x}, {y})");
+            }
+            
+            // Force particle system updates to ensure particles are created
+            for (int i = 0; i < 3; i++)
+            {
+                _particleSystem.Update(0.016f);
+            }
+            
+            var stats = _particleSystem.GetStatistics();
+            _logger.LogInformation($"✅ Test particles created: {stats.AliveParticles} alive particles");
+            
+            // DirectX 12 canvas uses true GPU-to-GPU rendering - no CPU readback needed
+            _logger.LogInformation("🚀 DirectX 12 canvas using true GPU-to-GPU texture sharing - check DirectX 12 output");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ CPU readback test failed");
+        }
+    }
+    
+    private void TestCanvasUpdateButton_Click(object? sender, RoutedEventArgs e)
+    {
+        // _logger.LogInformation("🟤 TEST: Canvas Update - Force canvas invalidation and redraw");
+        
+        // try
+        // {
+        //     if (_paintCanvas != null)
+        //     {
+        //         _paintCanvas.InvalidateVisual();
+        //         _paintCanvas.TestForceRedraw();
+        //         _logger.LogInformation("✅ Canvas update test completed");
+        //     }
+        //     else
+        //     {
+        //         _logger.LogError("❌ PaintCanvas is null");
+        //     }
+        // }
+        // catch (Exception ex)
+        // {
+        //     _logger.LogError(ex, "❌ Canvas update test failed");
+        // }
+    }
+    
+    private void TestStrokeSimulationButton_Click(object? sender, RoutedEventArgs e)
+    {
+        _logger.LogInformation("🔘 TEST: Stroke Simulation - Simulating mouse stroke");
+        
+        try
+        {
+            var sessionId = 4000;
+            var startX = 300f;
+            var startY = 300f;
+            
+            // Start stroke
+            _particleSystem.StartStroke(sessionId, startX, startY, "default", 100.0f, new Float4(0.0f, 1.0f, 1.0f, 1.0f));
+            
+            // Simulate stroke movement
+            for (int i = 0; i < 20; i++)
+            {
+                var x = startX + (i * 10);
+                var y = startY + (float)Math.Sin(i * 0.3) * 50;
+                
+                _particleSystem.ContinueStroke(sessionId, x, y, 1.0f);
+                _particleSystem.Update(0.016f);
+            }
+            
+            _particleSystem.EndStroke(sessionId);
+            
+            _logger.LogInformation("✅ Stroke simulation test completed");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ Stroke simulation test failed");
+        }
+    }
+    
+    private void TestColorVisibilityButton_Click(object? sender, RoutedEventArgs e)
+    {
+        _logger.LogInformation("🔴 TEST: Color Visibility - Testing different particle colors");
+        
+        try
+        {
+            _particleSystem.ClearAllParticles();
+            
+            var testColors = new (Float4 color, string name)[]
+            {
+                (new Float4(1.0f, 0.0f, 0.0f, 1.0f), "Red"),
+                (new Float4(0.0f, 1.0f, 0.0f, 1.0f), "Green"),
+                (new Float4(0.0f, 0.0f, 1.0f, 1.0f), "Blue"),
+                (new Float4(1.0f, 1.0f, 1.0f, 1.0f), "White"),
+                (new Float4(0.0f, 0.0f, 0.0f, 1.0f), "Black"),
+                (new Float4(1.0f, 1.0f, 0.0f, 1.0f), "Yellow"),
+                (new Float4(1.0f, 0.0f, 1.0f, 1.0f), "Magenta"),
+                (new Float4(0.0f, 1.0f, 1.0f, 1.0f), "Cyan"),
+            };
+            
+            for (int i = 0; i < testColors.Length; i++)
+            {
+                var sessionId = 5000 + i;
+                var x = 100 + (i % 4) * 200;
+                var y = 100 + (i / 4) * 200;
+                
+                _particleSystem.StartStroke(sessionId, x, y, "default", 150.0f, testColors[i].color);
+                
+                for (int j = 0; j < 8; j++)
+                {
+                    _particleSystem.Update(0.016f);
+                }
+                
+                _particleSystem.EndStroke(sessionId);
+                
+                _logger.LogInformation($"Created {testColors[i].name} particles at ({x}, {y})");
+            }
+            
+            _logger.LogInformation("✅ Color visibility test completed");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "❌ Color visibility test failed");
+        }
+    }
+    
+    private void TestSizeVisibilityButton_Click(object? sender, RoutedEventArgs e)
+    {
+        // _logger.LogInformation("🔵 TEST: Size Visibility - Testing different particle sizes");
+        
+        // try
+        // {
+        //     _particleSystem.ClearAllParticles();
+            
+        //     var testSizes = new float[] { 2.0f, 4.0f, 8.0f, 12.0f, 16.0f };
+            
+        //     for (int i = 0; i < testSizes.Length; i++)
+        //     {
+        //         var sessionId = 6000 + i;
+        //         var x = 200 + (i * 250);
+        //         var y = 400;
+                
+        //         _particleSystem.StartStroke(sessionId, x, y, "default", testSizes[i], new Float4(1.0f, 0.5f, 0.0f, 1.0f));
+                
+        //         for (int j = 0; j < 5; j++)
+        //         {
+        //             _particleSystem.Update(0.016f);
+        //         }
+                
+        //         _particleSystem.EndStroke(sessionId);
+                
+        //         _logger.LogInformation($"Created particles of size {testSizes[i]} at ({x}, {y})");
+        //     }
+            
+        //     _logger.LogInformation("✅ Size visibility test completed");
+        // }
+        // catch (Exception ex)
+        // {
+        //     _logger.LogError(ex, "❌ Size visibility test failed");
+        // }
+    }
+    
+    private void TestBackgroundButton_Click(object? sender, RoutedEventArgs e)
+    {
+        // _logger.LogInformation("🟢 TEST: Background - Testing canvas background colors");
+        
+        // try
+        // {
+        //     if (_paintCanvas != null)
+        //     {
+        //         _paintCanvas.TestBackgroundColors();
+        //         _logger.LogInformation("✅ Background test completed");
+        //     }
+        //     else
+        //     {
+        //         _logger.LogError("❌ PaintCanvas is null");
+        //     }
+        // }
+        // catch (Exception ex)
+        // {
+        //     _logger.LogError(ex, "❌ Background test failed");
+        // }
+    }
+    
+    #endregion
+    
+    private void MainWindow_KeyDown(object? sender, Avalonia.Input.KeyEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case Avalonia.Input.Key.F11:
+                ToggleFullscreen();
+                break;
+            case Avalonia.Input.Key.Escape:
+                if (_isFullscreen)
+                {
+                    ToggleFullscreen();
+                }
+                break;
+            case Avalonia.Input.Key.C when e.KeyModifiers.HasFlag(Avalonia.Input.KeyModifiers.Control):
+                ClearCanvasButton_Click(null, new RoutedEventArgs());
+                break;
+        }
+    }
+    
+    private void ToggleFullscreen()
+    {
+        if (_isFullscreen)
+        {
+            WindowState = _previousWindowState;
+            _isFullscreen = false;
+        }
+        else
+        {
+            _previousWindowState = WindowState;
+            WindowState = WindowState.FullScreen;
+            _isFullscreen = true;
+        }
+        
+        _logger.LogInformation($"Fullscreen toggled: {_isFullscreen}");
+    }
+    
+    // Input event handlers for mouse/touch
+    private void OnPointerPressed(object? sender, Avalonia.Input.PointerPressedEventArgs e)
+    {
+        var position = e.GetPosition(_paintCanvas);
+        var sessionId = e.Pointer.Id;
+        
+#if RAW_MOUSE_POINTER
+        // Just track mouse button state for raw input
+        _isMousePressed = true;
+        _lastRawPosition = Vector2.Zero; // Reset tracking
+        _lastRawTimestamp = 0.0f; // Reset timestamp
+        _logger.LogDebug($"🖱️ Mouse pressed - enabling raw input");
+        
+        // Don't process normal mouse events when raw input is enabled
+        return;
+#endif
+        
+        lock (_inputLock)
+        {
+            var currentTime = (float)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0f;
+            
+            _lastPositions[sessionId] = new Vector2((float)position.X, (float)position.Y);
+            _lastTimestamps[sessionId] = currentTime;
+            
+            // Create input event
+            var inputEvent = new InputEvent
+            {
+                Position = new Float2((float)position.X, (float)position.Y),
+                Velocity = new Float2(0, 0), // No velocity on initial press
+                Color = new Float4(GetColorForSession(sessionId).X, GetColorForSession(sessionId).Y, 
+                                  GetColorForSession(sessionId).Z, GetColorForSession(sessionId).W),
+                Size = GetSizeForSession(sessionId),
+                Timestamp = currentTime,
+                SessionId = sessionId,
+                TextureIndex = (_textureCounter++) & 7,
+                Rotation = (float)(_rng.NextDouble() * MathF.Tau)
+            };
+            
+            // Process immediately for immediate response
+            var events = new InputEvent[] { inputEvent };
+            _particleSystem.ProcessInputEvents(events);
+        }
+        
+        _logger.LogDebug($"🖱️ Pointer pressed at ({position.X:F1}, {position.Y:F1}) - Session {sessionId}");
+    }
+    
+    private void OnPointerMoved(object? sender, Avalonia.Input.PointerEventArgs e)
+    {
+        var position = e.GetPosition(_paintCanvas);
+        var sessionId = e.Pointer.Id;
+        
+#if RAW_MOUSE_POINTER
+        // Don't process normal mouse events when raw input is enabled and mouse is pressed
+        if (_isMousePressed)
+        {
+
+            _particleSystem.ProcessInputEvents(events.ToArray());
+            events.Clear();
+            return; // Let raw input handle the high-frequency updates
+        }
+#endif
+        
+        lock (_inputLock)
+        {
+            if (_lastPositions.TryGetValue(sessionId, out var lastPos) && 
+                _lastTimestamps.TryGetValue(sessionId, out var lastTime))
+            {
+                var currentPos = new Vector2((float)position.X, (float)position.Y);
+                var currentTime = (float)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0f;
+                var velocity = (currentPos - lastPos) * 60.0f; // Convert to velocity
+                
+                // Create continuous trail by interpolating between positions
+                var distance = Vector2.Distance(lastPos, currentPos);
+                var events = new List<InputEvent>();
+                
+                // Create more events for longer distances to ensure continuous trail
+                var numEvents = Math.Max(1, (int)(distance / 1.0f)); // One event every 2 pixels for denser trail
+                
+                for (int i = 0; i < numEvents; i++)
+                {
+                    var t = numEvents == 1 ? 1.0f : (float)i / (numEvents - 1);
+                    var interpPos = Vector2.Lerp(lastPos, currentPos, t);
+                    
+                    // Blend timestamps for gradual fade: earlier interpolated points get earlier timestamps
+                    var blendedTime = lastTime + (currentTime - lastTime) * t;
+                    
+                    var inputEvent = new InputEvent
+                    {
+                        Position = new Float2(interpPos.X, interpPos.Y),
+                        Velocity = new Float2(velocity.X, velocity.Y),
+                        Color = new Float4(GetColorForSession(sessionId).X, GetColorForSession(sessionId).Y, 
+                                          GetColorForSession(sessionId).Z, GetColorForSession(sessionId).W),
+                        Size = GetSizeForSession(sessionId),
+                        Timestamp = blendedTime,
+                        SessionId = sessionId,
+                        TextureIndex = (_textureCounter++) & 7,
+                        Rotation = (float)(_rng.NextDouble() * MathF.Tau)
+                    };
+                    
+                    events.Add(inputEvent);
+                }
+                
+                _lastPositions[sessionId] = currentPos;
+                _lastTimestamps[sessionId] = currentTime;
+                
+                // Log interpolation info for debugging
+                if (events.Count > 1)
+                {
+                    var timeDiff = currentTime - lastTime;
+                    _logger.LogDebug($"🔄 Interpolated {events.Count} events for distance {distance:F1}px, time span {timeDiff:F3}s");
+                }
+                
+                // Process all interpolated events immediately for smooth painting
+                _particleSystem.ProcessInputEvents(events.ToArray());
+            }
+        }
+    }
+    
+    private void OnPointerReleased(object? sender, Avalonia.Input.PointerReleasedEventArgs e)
+    {
+        var sessionId = e.Pointer.Id;
+        
+#if RAW_MOUSE_POINTER
+        _isMousePressed = false;
+        _lastRawPosition = Vector2.Zero; // Reset tracking
+        _lastRawTimestamp = 0.0f; // Reset timestamp
+        _logger.LogDebug($"🖱️ Mouse released - disabling raw input");
+        return;
+#endif
+        
+        lock (_inputLock)
+        {
+            _lastPositions.Remove(sessionId);
+            _lastTimestamps.Remove(sessionId);
+        }
+        
+        _logger.LogDebug($"🖱️ Pointer released - Session {sessionId}");
+    }
+    
+    private Vector4 GetColorForSession(int sessionId)
+    {
+        // Generate different colors for different sessions
+        var colors = new Vector4[]
+        {
+            new Vector4(1.0f, 0.2f, 0.2f, 1.0f), // Red
+            new Vector4(0.2f, 1.0f, 0.2f, 1.0f), // Green
+            new Vector4(0.2f, 0.2f, 1.0f, 1.0f), // Blue
+            new Vector4(1.0f, 1.0f, 0.2f, 1.0f), // Yellow
+            new Vector4(1.0f, 0.2f, 1.0f, 1.0f), // Magenta
+            new Vector4(0.2f, 1.0f, 1.0f, 1.0f), // Cyan
+        };
+        
+        return colors[sessionId % colors.Length];
+    }
+    
+    private float GetSizeForSession(int sessionId)
+    {
+        // Smaller particle sizes for better paint blending
+        var sizes = new float[] { 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f };
+        return sizes[sessionId % sizes.Length];
+    }
+    
+    protected override void OnClosed(EventArgs e)
+    {
+        try
+        {
+            _logger.LogInformation("MainWindow closing - disposing resources...");
+            
+            // Stop timers
+            _uiUpdateTimer?.Stop();
+            _uiUpdateTimer?.Dispose();
+            
+            // Dispose GPU resources
+            _particleSystem?.Dispose();
+            //_paintCanvas?.Dispose();
+            
+            // Dispose TUIO client
+            _tuioClient?.Dispose();
+
+#if RAW_MOUSE_POINTER && WINDOWS
+            if (_oldWndProc != IntPtr.Zero && _hwnd != IntPtr.Zero)
+            {
+                SetWindowLongPtr(_hwnd, GWLP_WNDPROC, _oldWndProc);
+                _oldWndProc = IntPtr.Zero;
+            }
+#endif
+            _logger.LogInformation("MainWindow closed successfully");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during MainWindow cleanup");
+        }
+        
+        base.OnClosed(e);
+    }
+
+#if RAW_MOUSE_POINTER && WINDOWS
+    // ------------------------------------------------------------
+    // Win32 raw input constants, structs and P/Invoke declarations
+    // ------------------------------------------------------------
+    private const int WM_INPUT = 0x00FF;
+    private const uint RID_INPUT = 0x10000003;
+    private const uint RIM_TYPEMOUSE = 0;
+    private const int GWLP_WNDPROC = -4;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RAWINPUTDEVICE
+    {
+        public ushort usUsagePage;
+        public ushort usUsage;
+        public uint dwFlags;
+        public IntPtr hwndTarget;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RAWINPUTHEADER
+    {
+        public uint dwType;
+        public uint dwSize;
+        public IntPtr hDevice;
+        public IntPtr wParam;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RAWMOUSE
+    {
+        public ushort usFlags;
+        public uint ulButtons;
+        public ushort usButtonFlags;
+        public ushort usButtonData;
+        public uint ulRawButtons;
+        public int lLastX;
+        public int lLastY;
+        public uint ulExtraInformation;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RAWINPUT
+    {
+        public RAWINPUTHEADER header;
+        public RAWMOUSE mouse;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool RegisterRawInputDevices([In] RAWINPUTDEVICE[] pRawInputDevices, uint uiNumDevices, uint cbSize);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetRawInputData(IntPtr hRawInput, uint uiCommand, IntPtr pData, ref uint pcbSize, uint cbSizeHeader);
+
+    [DllImport("user32.dll", EntryPoint = "CallWindowProcW")]
+    private static extern IntPtr CallWindowProc(IntPtr lpPrevWndFunc, IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+    private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
+    private static extern IntPtr SetWindowLongPtr32(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    private static IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong) =>
+        IntPtr.Size == 8 ? SetWindowLongPtr64(hWnd, nIndex, dwNewLong) : SetWindowLongPtr32(hWnd, nIndex, dwNewLong);
+
+    // Runtime state for raw input
+    private IntPtr _hwnd = IntPtr.Zero;
+    private IntPtr _oldWndProc = IntPtr.Zero;
+    private delegate IntPtr WndProcDelegate(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    private WndProcDelegate? _wndProcDelegate;
+    private bool _isWindowActive = false;
+    private bool _isMousePressed = false; // Track mouse button state
+    private int _rawEventCounter = 0; // Counter for raw input events to avoid spam
+    private Vector2 _lastRawPosition = Vector2.Zero; // Track last raw input position for interpolation
+    private float _lastRawTimestamp = 0.0f; // Track last raw input timestamp
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT { public int X; public int Y; }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out POINT lpPoint);
+
+    [DllImport("user32.dll")]
+    private static extern bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
+
+    // ------------------------------------------------------------
+    // Raw input initialization and processing
+    // ------------------------------------------------------------
+    private void InitializeRawMouseInput()
+    {
+        // Obtain native HWND
+        _hwnd = GetWindowHandle();
+        if (_hwnd == IntPtr.Zero)
+        {
+            _logger.LogWarning("RAW_MOUSE_POINTER: Unable to obtain window handle – raw input disabled.");
+            return;
+        }
+
+        // Register for raw mouse input targeting this window only when focused
+        var rid = new[]
+        {
+            new RAWINPUTDEVICE
+            {
+                usUsagePage = 0x01, // Generic desktop controls
+                usUsage = 0x02,     // Mouse
+                dwFlags = 0,        // Receive only when focused
+                hwndTarget = _hwnd
+            }
+        };
+
+        if (!RegisterRawInputDevices(rid, (uint)rid.Length, (uint)Marshal.SizeOf<RAWINPUTDEVICE>()))
+        {
+            _logger.LogError($"RAW_MOUSE_POINTER: RegisterRawInputDevices failed – Win32 error {Marshal.GetLastWin32Error()}");
+            return;
+        }
+
+        // Subclass the window procedure
+        _wndProcDelegate = RawInputWndProc;
+        _oldWndProc = SetWindowLongPtr(_hwnd, GWLP_WNDPROC, Marshal.GetFunctionPointerForDelegate(_wndProcDelegate));
+
+        // Track window activation state and reset mouse state on focus changes
+        this.Activated += (_, __) => { _isWindowActive = true; _isMousePressed = false; _lastRawPosition = Vector2.Zero; _lastRawTimestamp = 0.0f; }; // Reset on activation
+        this.Deactivated += (_, __) => { _isWindowActive = false; _isMousePressed = false; _lastRawPosition = Vector2.Zero; _lastRawTimestamp = 0.0f; }; // Reset on deactivation
+        _isWindowActive = this.IsActive;
+
+        _logger.LogInformation("RAW_MOUSE_POINTER: Raw mouse input successfully initialised.");
+    }
+    private List<InputEvent> events = new List<InputEvent>();
+    private IntPtr RawInputWndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
+    {
+        if (msg == WM_INPUT && _isWindowActive)
+        {
+            uint size = 0;
+            GetRawInputData(lParam, RID_INPUT, IntPtr.Zero, ref size, (uint)Marshal.SizeOf<RAWINPUTHEADER>());
+            if (size > 0)
+            {
+                IntPtr buffer = Marshal.AllocHGlobal((int)size);
+                try
+                {
+                    if (GetRawInputData(lParam, RID_INPUT, buffer, ref size, (uint)Marshal.SizeOf<RAWINPUTHEADER>()) == size)
+                    {
+                        var raw = Marshal.PtrToStructure<RAWINPUT>(buffer);
+                        if (raw.header.dwType == RIM_TYPEMOUSE)
+                        {
+                            int dx = raw.mouse.lLastX;
+                            int dy = raw.mouse.lLastY;
+                            
+                            // Only process raw input deltas when mouse is pressed
+                            if ((dx != 0 || dy != 0) && _isMousePressed)
+                            {
+                                // Get current cursor position in screen coordinates
+                                if (GetCursorPos(out var screenPoint))
+                                {
+                                    // Convert to window client coordinates
+                                    var clientPoint = screenPoint;
+                                    if (ScreenToClient(_hwnd, ref clientPoint))
+                                    {
+                                        // Use the actual cursor position, not accumulated deltas
+                                        var canvasBounds = _paintCanvas?.Bounds ?? new Rect(0, 0, 1920, 1080);
+                                        var clampedX = Math.Clamp(clientPoint.X, 0, (int)canvasBounds.Width);
+                                        var clampedY = Math.Clamp(clientPoint.Y, 0, (int)canvasBounds.Height);
+                                        
+                                        var currentPos = new Vector2(clampedX, clampedY);
+                                        var currentTime = (float)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0f;
+                                        var velocity = new Vector2(dx * 10.0f, dy * 10.0f);
+                                        
+                                         
+                                        
+                                        // Create interpolated events for smooth trails
+                                        if (_lastRawTimestamp > 0)
+                                        {
+                                            var distance = Vector2.Distance(_lastRawPosition, currentPos);
+                                            var numEvents = 1; // Math.Max(1, (int)(distance / 15.5f)); // One event every 2 pixels for denser trail
+                                            
+                                            for (int i = 0; i < numEvents; i++)
+                                            {
+                                                var t = numEvents == 1 ? 1.0f : (float)i / (numEvents - 1);
+                                                var interpPos = Vector2.Lerp(_lastRawPosition, currentPos, t);
+                                                
+                                                // Blend timestamps for gradual fade: earlier interpolated points get earlier timestamps
+                                                var blendedTime = _lastRawTimestamp + (currentTime - _lastRawTimestamp) * t;
+                                                
+                                                var inputEvent = new InputEvent
+                                                {
+                                                    Position = new Float2(interpPos.X, interpPos.Y),
+                                                    Velocity = new Float2(velocity.X, velocity.Y),
+                                                    Size = 80.0f,
+                                                    Color = new Float4(1.0f, 0.2f, 0.2f, 1.0f), // Red for raw input
+                                                    Timestamp = blendedTime,
+                                                    SessionId = 999,
+                                                    TextureIndex = (_textureCounter++) & 7,
+                                                    Rotation = 0.0f
+                                                };
+                                                
+                                                events.Add(inputEvent);
+                                            }
+                                            if (DateTime.Now.Millisecond % 5 == 0)
+                                            {
+                                                _particleSystem.ProcessInputEvents(events.ToArray());
+                                                events.Clear();
+                                            }
+                                            // Debug logging for interpolation
+                                            if (events.Count > 1)
+                                            {
+                                                var timeDiff = currentTime - _lastRawTimestamp;
+                                                //_logger.LogDebug($"🔄 Raw input interpolated {events.Count} events for distance {distance:F1}px, time span {timeDiff:F3}s");
+                                            }
+                                        }
+                                        else
+                                        {
+                                            // First event, no interpolation
+                                            var inputEvent = new InputEvent
+                                            {
+                                                Position = new Float2(currentPos.X, currentPos.Y),
+                                                Velocity = new Float2(velocity.X, velocity.Y),
+                                                Size = 125.0f,
+                                                Color = new Float4(1.0f, 0.2f, 0.2f, 1.0f), // Red for raw input
+                                                Timestamp = currentTime,
+                                                SessionId = 999,
+                                                TextureIndex = (_textureCounter++) & 7,
+                                                Rotation = 0.0f
+                                            };
+                                            
+                                            events.Add(inputEvent);
+
+                                            _particleSystem.ProcessInputEvents(events.ToArray());
+                                            events.Clear();
+                                        }
+                                        
+                                        // Update tracking variables
+                                        _lastRawPosition = currentPos;
+                                        _lastRawTimestamp = currentTime;
+
+                                        
+                                        
+                                        // Debug logging every 50th event to avoid spam
+                                        if (System.Threading.Interlocked.Increment(ref _rawEventCounter) % 50 == 0)
+                                        {
+                                            //_logger.LogDebug($"🖱️ Raw mouse at ({clampedX}, {clampedY}) delta=({dx}, {dy})");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
+            }
+            // We handled it – return 0
+            return IntPtr.Zero;
+        }
+        // Call original WndProc
+        return _oldWndProc != IntPtr.Zero ? CallWindowProc(_oldWndProc, hWnd, msg, wParam, lParam)
+                                          : IntPtr.Zero;
+    }
+
+    private IntPtr GetWindowHandle()
+    {
+        // Try reflection to obtain PlatformImpl.Handle (works on Avalonia Win32 backend)
+        try
+        {
+            var platformImplProp = typeof(Window).GetProperty("PlatformImpl", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            var platformImpl = platformImplProp?.GetValue(this);
+            if (platformImpl != null)
+            {
+                var handleProp = platformImpl.GetType().GetProperty("Handle");
+                if (handleProp?.GetValue(platformImpl) is IntPtr handle && handle != IntPtr.Zero)
+                {
+                    return handle;
+                }
+            }
+            if (TryGetPlatformHandle()?.Handle is { } hwnd && hwnd != IntPtr.Zero)
+            {
+                return hwnd;
+
+            }
+        }
+        catch { /* ignored */ }
+        return IntPtr.Zero;
+    }
+#endif
+} 
